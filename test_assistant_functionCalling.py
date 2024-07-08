@@ -8,26 +8,24 @@ load_dotenv()
 api_key = os.getenv('OPENAI_API_KEY')
 client = OpenAI(api_key=api_key)
  
-def get_current_weather(location, unit="fahrenheit"):
-    """Get the current weather in a given location"""
+def get_current_temperature(location):
+    """Get the current temperature in a given location"""
     if "tokyo" in location.lower():
-        return json.dumps({"location": "Tokyo", "temperature": "10", "unit": unit})
+        return json.dumps({"location": "Tokyo", "temperature": "100"})
     elif "san francisco" in location.lower():
-        return json.dumps({"location": "San Francisco", "temperature": "72", "unit": unit})
+        return json.dumps({"location": "San Francisco", "temperature": "200"})
     elif "paris" in location.lower():
-        return json.dumps({"location": "Paris", "temperature": "22", "unit": unit})
+        return json.dumps({"location": "Paris", "temperature": "300"})
     else:
         return json.dumps({"location": location, "temperature": "unknown"})
 
 def run_conversation():
-    # Step 1: send the conversation and available functions to the model
-    messages = [{"role": "user", "content": "What's the weather like in San Francisco, Tokyo, and Paris?"}]
     tools = [
         {
             "type": "function",
             "function": {
-                "name": "get_current_weather",
-                "description": "Get the current weather in a given location",
+                "name": "get_current_temperature",
+                "description": "Get the current temperature in a given location",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -35,52 +33,97 @@ def run_conversation():
                             "type": "string",
                             "description": "The city and state, e.g. San Francisco, CA",
                         },
-                        "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]},
                     },
                     "required": ["location"],
                 },
             },
         }
     ]
-    response = client.chat.completions.create(
-        model="gpt-4o",
-        messages=messages,
-        tools=tools,
-        tool_choice="auto",  # auto is default, but we'll be explicit
-    )
-    response_message = response.choices[0].message
-    print(response_message)
-    print("--------------")
-    tool_calls = response_message.tool_calls
-    # Step 2: check if the model wanted to call a function
-    if tool_calls:
-        # Step 3: call the function
-        # Note: the JSON response may not always be valid; be sure to handle errors
-        available_functions = {
-            "get_current_weather": get_current_weather,
-        }  # only one function in this example, but you can have multiple
-        messages.append(response_message)  # extend conversation with assistant's reply
-        # Step 4: send the info for each function call and function response to the model
-        for tool_call in tool_calls:
-            function_name = tool_call.function.name
-            function_to_call = available_functions[function_name]
-            function_args = json.loads(tool_call.function.arguments)
-            function_response = function_to_call(
-                location=function_args.get("location"),
-                unit=function_args.get("unit"),
-            )
-            messages.append(
-                {
-                    "tool_call_id": tool_call.id,
-                    "role": "tool",
-                    "name": function_name,
-                    "content": function_response,
-                }
-            )  # extend conversation with function response
-        second_response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=messages,
-        )  # get a new response from the model where it can see the function response
-        return second_response
-print(run_conversation())
 
+    assistant = client.beta.assistants.create(
+        name="funtion_calling_pruebaReal_01",
+        instructions="You are a weather bot. Use the provided functions to answer questions.",
+        model="gpt-4-1106-preview",
+        tools=tools
+    )
+    print(assistant.id)
+    thread = client.beta.threads.create()
+    message = client.beta.threads.messages.create(
+        thread_id=thread.id,
+        role="user",
+        content="What's the weather like in Tokyo and Bogota?",
+    )
+    print(thread.id)
+    new_message, messages, run = run_assistant(thread, assistant)
+    print(new_message)
+    print("-----------------------")
+    print(messages)
+    print("-----------------------")
+    print(run)
+    print("-----------------------")
+    return new_message, messages, run, thread, assistant
+
+def run_assistant(thread, assistant):
+
+    # Run the assistant
+    run = client.beta.threads.runs.create(
+        thread_id=thread.id,
+        assistant_id=assistant.id,
+    )
+    print(run.id)
+    # Wait for completion
+    while run.status != "requires_action":
+        # Be nice to the API
+        time.sleep(0.5)
+        run = client.beta.threads.runs.retrieve(thread_id=thread.id, run_id=run.id)
+        print(run.status)
+
+    # Retrieve the Messages
+    messages = client.beta.threads.messages.list(thread_id=thread.id)
+    new_message = messages.data[0].content[0].text.value
+    return new_message, messages, run
+
+
+new_message, messages, run, thread, assistant = run_conversation()
+
+tool_outputs = []
+ 
+# Loop through each tool in the required action section
+for tool in run.required_action.submit_tool_outputs.tool_calls:
+  if tool.function.name == "get_current_temperature":
+    tool_outputs.append({
+      "tool_call_id": tool.id,
+      "output": "57"
+    })
+  elif tool.function.name == "get_rain_probability":
+    tool_outputs.append({
+      "tool_call_id": tool.id,
+      "output": "0.06"
+    })
+ 
+# Submit all tool outputs at once after collecting them in a list
+if tool_outputs:
+  try:
+    run = client.beta.threads.runs.submit_tool_outputs_and_poll(
+      thread_id=thread.id,
+      run_id=run.id,
+      tool_outputs=tool_outputs
+    )
+    print("Tool outputs submitted successfully.")
+    print("-----------------------")
+  except Exception as e:
+    print("Failed to submit tool outputs:", e)
+    print("-----------------------")
+else:
+  print("No tool outputs to submit.")
+ 
+if run.status == 'completed':
+  messages = client.beta.threads.messages.list(
+    thread_id=thread.id
+  )
+  print(messages)
+  print("-----------------------")
+  #message_text = messages['data'][0]['content'][0]['text']['value']
+  #print(message_text)
+else:
+  print(run.status)
